@@ -349,7 +349,6 @@ class dclut():
 
         # get dims to format dimensions and coordinates differently
         dims = self._get_dims()
-
         coords = {}
         for sn, sp in self.dcl['scales'].items():
             sv = self.scale_values(sn, indices[sp['dim']])
@@ -403,7 +402,9 @@ class dclut():
             sel_sizes = np.array([len(sel) for sel in self._selection.values()])
             if np.all(sel_sizes == 1):
                 # if all selections are singleton, then just pass the single set of indices
-                idxs = [*self._selection.values()]
+                for dim in range(self.dim_num):
+                    idxs.append(self._selection[dim][0])
+                idxs = [idxs]
             elif np.all(sel_sizes == sel_sizes[0]):
                 # if all dimensions have the same number of selections, then return each set of selections
                 for sel_i in range(sel_sizes[0]):
