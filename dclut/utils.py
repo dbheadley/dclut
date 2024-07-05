@@ -64,18 +64,18 @@ def format_indices(values):
     
     Parameters
     ----------
-    values : array-like
+    values : np.ndarray
         The values to format.
         
     Returns
     -------
-    indices : array-like
+    indices : np.ndarray
         The formatted indices.
     """
 
-    if type(values) != np.ndarray:
-        values = np.array(values)
-
     indices = np.round(values).astype(np.int64)
     indices = np.clip(indices, 0, None)
+    indices = np.array(indices).ravel()
     return indices
+
+

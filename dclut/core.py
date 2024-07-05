@@ -3,6 +3,7 @@ import os
 import json
 import re
 import xarray as xr
+from tqdm import tqdm
 from .utils import *
 
 def create_dclut(bin_path, shape, dcl_path=None, dtype='int16', data_name='data', 
@@ -65,7 +66,7 @@ def create_dclut(bin_path, shape, dcl_path=None, dtype='int16', data_name='data'
     if not os.path.exists(bin_path):
         raise FileNotFoundError('Binary file {} not found'.format(bin_path))
     
-    shape = np.array(shape)
+    shape = np.array(shape).astype(np.int64)
     dim_num = shape.size
 
     # Check shape validity
@@ -149,7 +150,7 @@ def create_dclut(bin_path, shape, dcl_path=None, dtype='int16', data_name='data'
 
         
 class dclut():
-    def __init__(self, path):
+    def __init__(self, path, verbose=False):
 
         self.dcl_path = path
         
@@ -172,10 +173,10 @@ class dclut():
                 raise ValueError('Unrecognized type for scale {}'.format(sn))
         
         self.bin_path = os.path.join(bin_dir, self.dcl['file']['name'])
+        self._verbose = verbose
         self.shape = tuple(self.dcl['file']['shape'])
         self.dim_num = len(self.shape)
-        self._fio = np.memmap(self.bin_path, dtype=self.dcl['data']['type'], mode='r', 
-                              shape=self.shape)
+        self._set_fio()
         self._selection = {d: None for d in range(self.dim_num)}
 
     def reset(self, dim=None):
@@ -199,70 +200,69 @@ class dclut():
         return self
     
     
-    def intervals(self, scales, intervals=None, mode='nearest'):
+    def intervals(self, select):
         """
         Set the intervals for reading a across a scale.
 
         Parameters
         ----------
-        scales : str or list of str
-            Name of the scales to take intervals over.
-        
-        Optional
-        --------
-        intervals : 2d numpy array or list of 2d numpy arrays
-            Array of intervals to read. Each row is an interval. The first column
+        select : dict
+            Selections for each scale. The key is the scale name and the value is
+            the intervals. Each row is an interval. The first column
             is the interval start (inclusive) and the second column is the interval
-            end (exclusive). If multiple scales are provided, then intervals must 
-            be a list of 2d numpy arrays where each is the same size.
-            Default is to return all values.
-        mode : str ('nearest', 'exact')
-            Mode for interval selection. 'nearest' selects the nearest value to the
-            start and end of the interval. 'exact' selects the exact value. Default
-            is 'nearest'.
+            end (exclusive). If multiple scales are provided, then all intervals must
+            be the same size.
+        
         """
 
-        scales, dim = self._validate_scales(scales)
-        intervals = self._validate_values(scales, intervals)
+        scales, dim = self._validate_scales(select)
+        intervals = self._validate_values(select)
         self._initialize_selection(dim)
 
+        if intervals[0].size == 2:
+            intervals = [i.reshape(1,2) for i in intervals]
+        
+        if intervals[0].shape[1] != 2:
+            raise ValueError('Intervals must be pairs of values')
+        
         if intervals is None: # return all values if no intervals are provided
-            self._selection[dim].append(slice(0, self.dcl['file']['shape'][dim]))
+            self._selection[dim].append(np.arange(0, self.dcl['file']['shape'][dim]))
         else: # find the index for the intervals
-            idxs = self._find_index(scales, intervals, mode=mode)
-            for i in range(idxs.shape[0]):
-                self._selection[dim][-1].append(slice(idxs[i,0], idxs[i,1]))
+            for i in range(intervals[0].shape[0]):
+                values = [interval[i] for interval in intervals]
+                self._selection[dim].append(self._find_index(scales, values, mode='exact'))
 
         return self
 
-    def points(self, scales, points=None, mode='nearest'):
+    def points(self, select, mode='nearest'):
         """
         Set specific points to read across a scale.
 
         Parameters
         ----------
-        scales : str or list of str
-            Name of the scales to take points over.
+        select : dict
+            Selections for each scale. The key is the scale name and the value is
+            the point or list of points to read. When multiple scales are provided,
+            the number of points must be the same for each scale.
 
         Optional
         --------
-        points: array-like of values
-            Points to read. Default is all values.
         mode : str ('nearest', 'exact')
             Mode for point selection. 'nearest' selects the nearest value to the
             point. 'exact' selects the exact value. Default is 'nearest'.
         """
 
-        scales, dim = self._validate_scales(scales)
-        points = self._validate_values(scales, points)
+        
+        scales, dim = self._validate_scales(select)
+        points = self._validate_values(select)
         self._initialize_selection(dim)
 
         if points is None: # return all values if no points are provided
-            self._selection[dim].append(slice(0, self.dcl['file']['shape'][dim]))
+            self._selection[dim].append(np.arange(0, self.dcl['file']['shape'][dim]))
         else: # find the index for the points
-            idxs = self._find_index(scales, points, mode=mode)
-            self._selection[dim][-1].append(idxs.flatten()[...])
-
+            for p in range(points[0].size):
+                values = [point[p] for point in points]
+                self._selection[dim].append(self._find_index(scales, values, mode=mode))
         return self
 
     def read(self, format='numpy', mode='union'):
@@ -276,10 +276,11 @@ class dclut():
             returns an xarray DataArray. The DataArray will have dimensions set to the
             first scales specified for each dimension in the dclut file. The remaining scales
             will be included as coordinates. Default is 'numpy
-        mode : str ('union', 'intersection')
+        mode : str ('union', 'intersection', 'split')
             Mode for reading the data. 'union' reads the union of all selections within 
             a dimension. 'intersection' reads the intersection of all selections within
-            a dimension. Default is 'union'.
+            a dimension. 'split' reads the data as separate arrays for each selection.
+            Default is 'union'.
 
         Returns
         -------
@@ -287,19 +288,29 @@ class dclut():
             Data based on the current selections.
         """
 
-        if mode not in ['union', 'intersection']:
+        if mode not in ['union', 'intersection', 'split']:
             raise ValueError('Unrecognized mode {}'.format(mode))
         
+        if self._test_empty_selection():
+            raise ValueError('No selection made for any dimension')
+        
+        # fill any remaining unselected dimensions with all their values (i.e. select all)
+        for dim in range(self.dim_num):
+            if self._selection[dim] is None:
+                self._selection[dim] = np.arange(0, self.shape[dim])
+            
         data, idxs = self._select(mode)
 
         if format == 'xarray':
-            if self._test_empty_selection():
-                data = None
-            else:
-                data = xr.DataArray(data, dims=self._get_dims(), coords=self._get_coords(idxs))
+            for i in range(len(data)):
+                data[i] = xr.DataArray(data[i], dims=self._get_dims(), coords=self._get_coords(idxs[i]))
 
         return data
     
+    def _set_fio(self):
+        self._fio = np.memmap(self.bin_path, dtype=self.dcl['data']['type'], mode='r', 
+                              shape=self.shape)
+        
     def _test_empty_selection(self):
         return all([sel is None for sel in self._selection.values()])
     
@@ -358,54 +369,68 @@ class dclut():
 
         Optional
         --------
-        mode : str ('union', 'intersection')
+        mode : str ('union', 'intersection', 'split')
             Mode for reading the data. 'union' reads the union of all selections within 
             a dimension. 'intersection' reads the intersection of all selections within
-            a dimension. Default is 'union'.
+            a dimension. 'split' reads the data as separate arrays for each selection.
+            Default is 'union'.
 
         Returns
         -------
-        data : numpy array
-            Data based on the union of the selections.
+        data : list of numpy arrays
+            Data based on the selections.
         idxs : list of numpy arrays
             Indices of the data.
         """
 
         idxs = []
-
-        # test if all selection dims are None
-        # and if so return empty data and indices
-        if self._test_empty_selection():
-            return np.array([]), [[] for i in range(self.dim_num)]
+        data = []
         
-        for dim in range(self.dim_num):
-            if self._selection[dim] is None: # if no selection is made for dim, return all values
-                idxs.append(np.ones(self.shape[dim], dtype=bool))
-            else: # otherwise, return the union of all selections
-                sel_bool = np.zeros(self.shape[dim], dtype=bool)
-                if mode == 'union':
-                    for sel in self._selection[dim]:
-                        for s in sel: 
-                            sel_bool[s] = True
-                elif mode == 'intersection':
+        if mode == 'union':
+            for dim in range(self.dim_num):
+                idxs.append(self._selection[dim][0])
+                for sel in self._selection[dim][1:]:
+                    idxs[dim] = np.union1d(idxs[dim], sel)
+            idxs = [idxs]
+        elif mode == 'intersection':
+            for dim in range(self.dim_num):
+                idxs.append(self._selection[dim][0])
+                for sel in self._selection[dim][1:]:
+                    idxs[dim] = np.intersect1d(idxs[dim], sel)
+            idxs = [idxs]
+        elif mode == 'split':
+            # test if all selection dims are the same size, or all are singleton except one
+            sel_sizes = np.array([len(sel) for sel in self._selection.values()])
+            if np.all(sel_sizes == 1):
+                # if all selections are singleton, then just pass the single set of indices
+                idxs = [*self._selection.values()]
+            elif np.all(sel_sizes == sel_sizes[0]):
+                # if all dimensions have the same number of selections, then return each set of selections
+                for sel_i in range(sel_sizes[0]):
+                    idxs.append([self._selection[d][sel_i] for d in range(self.dim_num)])
+            elif (np.unique(sel_sizes).size == 2) and (np.sum(sel_sizes == 1) == (self.dim_num-1)):
+                # if only one dimension has multiple selections, then split the data along that dimension
+                split_dim = np.where(sel_sizes != 1)[0][0]
+                for sel_i in range(sel_sizes[split_dim]):
+                    idxs.append([])
+                    for d in range(self.dim_num):
+                        if d == split_dim:
+                            idxs[-1].append(self._selection[d][sel_i])
+                        else:
+                            idxs[-1].append(self._selection[d][0])
+            else:
+                raise ValueError('Selections are not compatible for split mode')    
 
-                    # initialize the selection with the first selection as all true
-                    temp_bool = np.zeros(self.shape[dim], dtype=bool)
-                    for s in self._selection[dim][0]: # union selections at the same level
-                        temp_bool[s] = True
-                    sel_bool[temp_bool] = True
+        # get the data based on the indices
+        if self._verbose:
+            loop_iter = tqdm(range(len(idxs)))
+        else:
+            loop_iter = range(len(idxs))
 
-                    # for each subsequent selection, set to false if not in selection
-                    for sel in self._selection[dim][1:]:
-                        temp_bool = np.zeros(self.shape[dim], dtype=bool)
-                        for s in sel: # union selections at the same level
-                            temp_bool[s] = True
-                        sel_bool[np.logical_not(temp_bool)] = False
-                idxs.append(sel_bool)
-        
-        # convert boolean indices to integer indices appropriate for for broadcastable indexing
-        idxs = np.ix_(*idxs)
-        data = self._fio[idxs]
+        for i in loop_iter:
+            idxs[i] = np.ix_(*idxs[i]) # convert to broadcastable indices
+            data.append(self._fio[idxs[i]])
+            self._set_fio() # reset the file pointer to free up memory
 
         return data, idxs
 
@@ -416,12 +441,15 @@ class dclut():
         
         Parameters
         ----------
-        scales : str or list of str
+        scales : list of str
             Name of the scales. Must be from the same dimension. Multiple scales
-            can be provided when each is a list type. In that case, the index 
+            can be provided when each is a list type. In that case, the indices 
             that minimizes the distance across all the scales will be returned.
-        values : array-like or list of array-like
+        values : list of array-like
             Values to find. List of values is used when multiple scales are provided.
+            The number of values must be the same for each scale. Usually only one 
+            value is provided, but if two are provided, the first is the start and
+            the second is the end of an interval.
 
         Optional
         --------
@@ -433,62 +461,60 @@ class dclut():
         Returns
         -------
         value_idxs : numpy array of int
-            Index of the values.
+            Index of the values. If a value is present at multiple indices, then
+            all are returned.
         """
-
-        # Ensure minimum fomatting
-        if isinstance(scales, str):
-            scales = [scales]
-        if isinstance(values, np.ndarray):
-            values = [values]
-
-        values_shape = values[0].shape
-
-
-        # determine if multiple scales are provided and whether
-        # those scales are the list type
-        all_list = all([self.dcl['scales'][s]['type'] == 'list' for s in scales])
-        if len(scales) > 1:
-            if not all_list:
-                raise ValueError('Multiple scales must be of list type')
-            elif len(scales) != len(values):
-                raise ValueError('Number of scales and values do not match')
-            
-            # ensure values are the same shape across scales
-            if not all([v == values_shape for v in values[1:]]):
-                raise ValueError('Values must have the same shape')
         
+        all_list = all([self.dcl['scales'][s]['type'] == 'list' for s in scales])
+
         if all_list: # if all scales are list type, find the index using all values
             # get values for each scale
             scale_values = []
             for scale in scales:
                 scale_values.append(self.scale_values(scale))
 
-            values = [v.flatten() for v in values]
+            # replace nan values with infinity for comparison
+            scale_values = [np.where(np.isnan(sv), np.inf, sv) for sv in scale_values]
 
-            values_num = len(values[0])
+            values_num = values[0].size
             scales_num = len(scales)
-            value_idxs = np.zeros(np.prod(values_shape), dtype=int)
+            value_idxs = [] #np.zeros(values_num, dtype=int)
 
-            # for each value, find the index across scales that is closest
-            for v in range(values_num):
+            # if only one value, find the index/indices that are closest/match
+            if values_num == 1: 
                 dist = []
                 for s in range(scales_num):
                     if scale_values[s].dtype == np.number:
-                        dist.append(np.abs(scale_values[s] - values[s][v]))
+                        dist.append(np.abs(scale_values[s] - values[s]))
                     else: # forces exact match when scales are non-numeric
-                        dist.append(np.where(scale_values[s] == values[s][v], 0, np.inf))
+                        dist.append(np.where(scale_values[s] == values[s], 0, np.inf))
 
-                    # collapse distances across scales and find minimum
-                    dist_all = np.sum(np.vstack(dist), axis=0)
-                    value_idxs[v] = np.argmin(dist_all)
+                # collapse distances across scales and find minimum
+                dist_all = np.sum(np.vstack(dist), axis=0)
+                dist_min = np.min(dist_all)
+                value_idxs = np.where(dist_all == dist_min)[0]
 
-                    # ensure a minimum was present and meets matching criteria
-                    if dist_all[value_idxs[v]] == np.inf:
-                        raise ValueError('Value not found in scale')
-                    elif (mode == 'exact') and (dist_all[value_idxs[v]] != 0):
-                        raise ValueError('Value not found in scale with exact mode')
-                    
+                # ensure a minimum was present and meets matching criteria
+                if any(dist_all[value_idxs] == np.inf):
+                    raise ValueError('Value not found in scale')
+                elif (mode == 'exact') and any(dist_all[value_idxs] != 0):
+                    raise ValueError('Value not found in scale with exact mode')
+            elif values_num == 2:
+                valid = []
+                for s in range(scales_num):
+                    if scale_values[s].dtype == np.number:
+                        valid.append(scale_values[s] >= values[s][0])
+                        valid.append(scale_values[s] < values[s][1])
+                    else:
+                        raise ValueError('Interval selection not supported for non-numeric scales')
+                    valid_all = np.vstack(valid)
+                    valid_all = np.all(valid_all, axis=0)
+                    value_idxs = np.where(valid_all)[0]
+            else:
+                raise ValueError('Values must be one or two values')
+            
+            value_idxs = np.array(value_idxs).ravel()
+
         else: # if scales are not all list type, find the index for the single value
             scale_type = self.dcl['scales'][scales[0]]['type']
             if scale_type == 'table':
@@ -502,19 +528,22 @@ class dclut():
             else:
                 raise ValueError('Unrecognized type for scale {}'.format(scales[0]))
         
+            if value_idxs.size == 2:
+                value_idxs = np.arange(value_idxs[0], value_idxs[1])
+
         value_idxs = format_indices(value_idxs)
-        value_idxs = value_idxs.reshape(values_shape)
         return value_idxs
 
 
-    def _validate_scales(self, scales):
+    def _validate_scales(self, select):
         """
         Validate the scales for the dclut file.
 
         Parameters
         ----------
-        scales : str or list of str
-            Name of the scales to validate.
+        select : dict
+            Selections for each scale. The key is the scale name and the value is
+            the point or list of points to read.
 
         Returns
         -------
@@ -524,29 +553,34 @@ class dclut():
             Dimension of the scales.
         """
 
-        if isinstance(scales, str):
-            scales = [scales]
+        scales = list(select.keys())
 
+        # check that scales are in the dclut file
         for scale in scales:
             if scale not in self.dcl['scales']:
                 raise ValueError('Scale {} not found in dclut file'.format(scale))
         
+        # Multiple scales can be used only if they are all the 'list' type
+        if len(scales) > 1:
+            if not all([self.dcl['scales'][s]['type'] == 'list' for s in scales]):
+                raise ValueError('Multiple scales must be of list type')
+        
+        # Ensure all scales are from the same dimension
         scale_dims = [self.dcl['scales'][scale]['dim'] for scale in scales]
         if len(set(scale_dims)) > 1:
             raise ValueError('Scales must be from the same dimension')
         
         return scales, scale_dims[0]
     
-    def _validate_values(self, scales, values):
+    def _validate_values(self, select):
         """
         Validate the values for the scales.
         
         Parameters
         ----------
-        scales : str or list of str
-            Name of the scales.
-        values : array-like or list of array-like
-            Values to validate.
+        select : dict
+            Selections for each scale. The key is the scale name and the value is
+            the point or list of points to read.
 
         Returns
         -------
@@ -554,26 +588,21 @@ class dclut():
             Validated values.
         """
 
-        # ensure agreement between scales and values
-        if isinstance(values, list):
-            if len(scales) != len(values):
-                raise ValueError('Number of scales and values do not match')
-            values = [np.array(v) for v in values]
-        elif isinstance(values, np.ndarray):
-            if len(scales) != 1:
-                raise ValueError('Number of scales and values do not match')
-            values = [values]
-        elif values is None:
-            return None
-        else:
-            values = [np.array(values)]
+        if type(select) == np.ndarray:
+            select = [select]
+        
+        # ensure consistent formatting of values
+        values = []
+        for sn in select:
+            values.append(np.array(select[sn]))
 
-        # ensure values are the same shape across scales
-        value_shape = values[0].shape
-        if not all([v.shape == value_shape for v in values]):
+        # check that all values are the same shape
+        shp = values[0].shape
+        if not all([v.shape == shp for v in values]):
             raise ValueError('Values must have the same shape')
         
         return values
+        
     
     def _initialize_selection(self, dim):
         """
@@ -581,9 +610,9 @@ class dclut():
         """
         
         if self._selection[dim] is None:
-            self._selection[dim] = [[]]
-        else:
-            self._selection[dim].append([])
+            self._selection[dim] = [] #[[]]
+        # else:
+        #     self._selection[dim].append([])
 
 
     def scale_values(self, scale, indices=None):
@@ -674,7 +703,10 @@ class dclut():
             s += '  dimension: {}\n'.format(sv['dim'])
             s += '  type: {}\n'.format(sv['type'])
             scale_values = self.scale_values(sn)
-            s += '  min: {}\n'.format(scale_values.min())
-            s += '  max: {}\n'.format(scale_values.max())
+            if scale_values.dtype == np.number:
+                s += '  min: {}\n'.format(np.nanmin(scale_values))
+                s += '  max: {}\n'.format(np.nanmax(scale_values))
+            else:
+                s += '  values: {}\n'.format(scale_values)
         return s
             
