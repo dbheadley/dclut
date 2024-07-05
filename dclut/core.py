@@ -226,7 +226,7 @@ class dclut():
             raise ValueError('Intervals must be pairs of values')
         
         if intervals is None: # return all values if no intervals are provided
-            self._selection[dim].append(np.arange(0, self.dcl['file']['shape'][dim]))
+            self._selection[dim].append(np.arange(0, self.shape[dim]))
         else: # find the index for the intervals
             for i in range(intervals[0].shape[0]):
                 values = [interval[i] for interval in intervals]
@@ -258,7 +258,7 @@ class dclut():
         self._initialize_selection(dim)
 
         if points is None: # return all values if no points are provided
-            self._selection[dim].append(np.arange(0, self.dcl['file']['shape'][dim]))
+            self._selection[dim].append(np.arange(0, self.shape[dim]))
         else: # find the index for the points
             for p in range(points[0].size):
                 values = [point[p] for point in points]
@@ -297,7 +297,7 @@ class dclut():
         # fill any remaining unselected dimensions with all their values (i.e. select all)
         for dim in range(self.dim_num):
             if self._selection[dim] is None:
-                self._selection[dim] = np.arange(0, self.shape[dim])
+                self._selection[dim] = [np.arange(0, self.shape[dim])]
             
         data, idxs = self._select(mode)
 
