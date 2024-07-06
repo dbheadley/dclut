@@ -291,12 +291,6 @@ class dclut():
         
         self._update_selection(dim, idxs, mode=select_mode)
 
-        # if points is None: # return all values if no points are provided
-        #     self._selection[dim].append(np.arange(0, self.shape[dim]))
-        # else: # find the index for the points
-        #     for p in range(points[0].size):
-        #         values = [point[p] for point in points]
-        #         self._selection[dim].append(self._find_index(scales, values, mode=mode))
         return self
 
     def read(self, format='numpy'):
@@ -415,14 +409,15 @@ class dclut():
                 self._selection[dim].extend(idxs)
             else:
                 idxs = np.concatenate(idxs)
-                self._selection[dim].append(idxs)
+                # had to force conversion to int64 to avoid numpy defaulting to float64
+                self._selection[dim].append(np.union1d(idxs,[]).astype('int64'))
         else:
             if mode == 'union': # combine new selection with existing selections
                 idxs = np.concatenate(idxs)
-                self._selection[dim] = [np.union1d(sel, idxs) for sel in self._selection[dim]]
+                self._selection[dim] = [np.union1d(sel, idxs).astype('int64') for sel in self._selection[dim]]
             elif mode == 'intersect': # find the intersection of the new and existing selections
                 idxs = np.concatenate(idxs)
-                self._selection[dim] = [np.intersect1d(sel, idxs) for sel in self._selection[dim]]
+                self._selection[dim] = [np.intersect1d(sel, idxs).astype('int64') for sel in self._selection[dim]]
             elif mode == 'split': # add new selections as separate layers
                 self._selection[dim].extend(idxs)
 
@@ -441,19 +436,6 @@ class dclut():
         idxs = []
         data = []
         
-        # if mode == 'union':
-        #     for dim in range(self.dim_num):
-        #         idxs.append(self._selection[dim][0])
-        #         for sel in self._selection[dim][1:]:
-        #             idxs[dim] = np.union1d(idxs[dim], sel)
-        #     idxs = [idxs]
-        # elif mode == 'intersection':
-        #     for dim in range(self.dim_num):
-        #         idxs.append(self._selection[dim][0])
-        #         for sel in self._selection[dim][1:]:
-        #             idxs[dim] = np.intersect1d(idxs[dim], sel)
-        #     idxs = [idxs]
-        # elif mode == 'split':
         # test if all selection dims are the same size, or all are singleton except one
         sel_sizes = np.array([len(sel) for sel in self._selection.values()])
         if np.all(sel_sizes == 1):
