@@ -200,7 +200,7 @@ class dclut():
         return self
     
     
-    def intervals(self, select):
+    def intervals(self, select, select_mode='union'):
         """
         Set the intervals for reading a across a scale.
 
@@ -212,6 +212,14 @@ class dclut():
             is the interval start (inclusive) and the second column is the interval
             end (exclusive). If multiple scales are provided, then all intervals must
             be the same size.
+
+        Optional
+        --------
+        select_mode : str ('union', 'intersect', 'split')
+            Mode for combining selections. 'union' takes the union of all selections within
+            the selected dimension. 'intersect' takes the intersection of all selections within
+            the selected dimension. 'split' breaks the selections into separate layers for each 
+            selection. Default is 'union'.
         
         """
 
@@ -225,16 +233,27 @@ class dclut():
         if intervals[0].shape[1] != 2:
             raise ValueError('Intervals must be pairs of values')
         
-        if intervals is None: # return all values if no intervals are provided
-            self._selection[dim].append(np.arange(0, self.shape[dim]))
-        else: # find the index for the intervals
+        idxs = []
+        if intervals is None:
+            idxs.append(np.arange(0, self.shape[dim]))
+        else:
             for i in range(intervals[0].shape[0]):
                 values = [interval[i] for interval in intervals]
-                self._selection[dim].append(self._find_index(scales, values, mode='exact'))
+                idxs.append(self._find_index(scales, values, mode='exact'))
+        
+        self._update_selection(dim, idxs, mode=select_mode)
+
+
+        # if intervals is None: # return all values if no intervals are provided
+        #     self._selection[dim].append(np.arange(0, self.shape[dim]))
+        # else: # find the index for the intervals
+        #     for i in range(intervals[0].shape[0]):
+        #         values = [interval[i] for interval in intervals]
+        #         self._selection[dim].append(self._find_index(scales, values, mode='exact'))
 
         return self
 
-    def points(self, select, mode='nearest'):
+    def points(self, select, select_mode='union', find_mode='nearest'):
         """
         Set specific points to read across a scale.
 
@@ -244,10 +263,15 @@ class dclut():
             Selections for each scale. The key is the scale name and the value is
             the point or list of points to read. When multiple scales are provided,
             the number of points must be the same for each scale.
-
+        
         Optional
         --------
-        mode : str ('nearest', 'exact')
+        select_mode : str ('union', 'intersect', 'split')
+            Mode for combining selections. 'union' takes the union of all selections within
+            the selected dimension. 'intersect' takes the intersection of all selections within
+            the selected dimension. 'split' breaks the selections into separate layers for each 
+            selection. Default is 'union'.
+        find_mode : str ('nearest', 'exact')
             Mode for point selection. 'nearest' selects the nearest value to the
             point. 'exact' selects the exact value. Default is 'nearest'.
         """
@@ -257,15 +281,25 @@ class dclut():
         points = self._validate_values(select)
         self._initialize_selection(dim)
 
-        if points is None: # return all values if no points are provided
-            self._selection[dim].append(np.arange(0, self.shape[dim]))
-        else: # find the index for the points
+        idxs = []
+        if points is None:
+            idxs = np.arange(0, self.shape[dim])
+        else:
             for p in range(points[0].size):
                 values = [point[p] for point in points]
-                self._selection[dim].append(self._find_index(scales, values, mode=mode))
+                idxs.append(self._find_index(scales, values, mode=find_mode))
+        
+        self._update_selection(dim, idxs, mode=select_mode)
+
+        # if points is None: # return all values if no points are provided
+        #     self._selection[dim].append(np.arange(0, self.shape[dim]))
+        # else: # find the index for the points
+        #     for p in range(points[0].size):
+        #         values = [point[p] for point in points]
+        #         self._selection[dim].append(self._find_index(scales, values, mode=mode))
         return self
 
-    def read(self, format='numpy', mode='union'):
+    def read(self, format='numpy'):
         """
         Read the data based on the current selections.
         
@@ -276,11 +310,6 @@ class dclut():
             returns an xarray DataArray. The DataArray will have dimensions set to the
             first scales specified for each dimension in the dclut file. The remaining scales
             will be included as coordinates. Default is 'numpy
-        mode : str ('union', 'intersection', 'split')
-            Mode for reading the data. 'union' reads the union of all selections within 
-            a dimension. 'intersection' reads the intersection of all selections within
-            a dimension. 'split' reads the data as separate arrays for each selection.
-            Default is 'union'.
 
         Returns
         -------
@@ -288,18 +317,15 @@ class dclut():
             Data based on the current selections.
         """
 
-        if mode not in ['union', 'intersection', 'split']:
-            raise ValueError('Unrecognized mode {}'.format(mode))
-        
         if self._test_empty_selection():
             raise ValueError('No selection made for any dimension')
-        
+
         # fill any remaining unselected dimensions with all their values (i.e. select all)
         for dim in range(self.dim_num):
             if self._selection[dim] is None:
                 self._selection[dim] = [np.arange(0, self.shape[dim])]
             
-        data, idxs = self._select(mode)
+        data, idxs = self._select()
 
         if format == 'xarray':
             for i in range(len(data)):
@@ -361,18 +387,48 @@ class dclut():
 
         return coords
 
-
-    def _select(self, mode='union'):
+    def _update_selection(self, dim, idxs, mode='union'):
         """
-        Get the selections.
+        Update the selection for a dimension.
 
+        Parameters
+        ----------
+        dim : int
+            Dimension to update.
+        idxs : list of numpy arrays
+            Indices to update.
+        
         Optional
         --------
-        mode : str ('union', 'intersection', 'split')
-            Mode for reading the data. 'union' reads the union of all selections within 
-            a dimension. 'intersection' reads the intersection of all selections within
-            a dimension. 'split' reads the data as separate arrays for each selection.
-            Default is 'union'.
+        mode : str ('union', 'intersect', 'split')
+            Mode for combining selections. 'union' takes the union of all selections within
+            the selected dimension. 'intersect' takes the intersection of all selections within
+            the selected dimension. 'split' breaks the selections into separate layers for each 
+            selection. Default is 'union'.
+        """
+        
+        if mode not in ['union', 'intersect', 'split']:
+            raise ValueError('Unrecognized mode {}'.format(mode))
+        
+        if len(self._selection[dim]) == 0:
+            if mode == 'split':
+                self._selection[dim].extend(idxs)
+            else:
+                idxs = np.concatenate(idxs)
+                self._selection[dim].append(idxs)
+        else:
+            if mode == 'union': # combine new selection with existing selections
+                idxs = np.concatenate(idxs)
+                self._selection[dim] = [np.union1d(sel, idxs) for sel in self._selection[dim]]
+            elif mode == 'intersect': # find the intersection of the new and existing selections
+                idxs = np.concatenate(idxs)
+                self._selection[dim] = [np.intersect1d(sel, idxs) for sel in self._selection[dim]]
+            elif mode == 'split': # add new selections as separate layers
+                self._selection[dim].extend(idxs)
+
+    def _select(self):
+        """
+        Get the selections.
 
         Returns
         -------
@@ -385,42 +441,42 @@ class dclut():
         idxs = []
         data = []
         
-        if mode == 'union':
+        # if mode == 'union':
+        #     for dim in range(self.dim_num):
+        #         idxs.append(self._selection[dim][0])
+        #         for sel in self._selection[dim][1:]:
+        #             idxs[dim] = np.union1d(idxs[dim], sel)
+        #     idxs = [idxs]
+        # elif mode == 'intersection':
+        #     for dim in range(self.dim_num):
+        #         idxs.append(self._selection[dim][0])
+        #         for sel in self._selection[dim][1:]:
+        #             idxs[dim] = np.intersect1d(idxs[dim], sel)
+        #     idxs = [idxs]
+        # elif mode == 'split':
+        # test if all selection dims are the same size, or all are singleton except one
+        sel_sizes = np.array([len(sel) for sel in self._selection.values()])
+        if np.all(sel_sizes == 1):
+            # if all selections are singleton, then just pass the single set of indices
             for dim in range(self.dim_num):
                 idxs.append(self._selection[dim][0])
-                for sel in self._selection[dim][1:]:
-                    idxs[dim] = np.union1d(idxs[dim], sel)
             idxs = [idxs]
-        elif mode == 'intersection':
-            for dim in range(self.dim_num):
-                idxs.append(self._selection[dim][0])
-                for sel in self._selection[dim][1:]:
-                    idxs[dim] = np.intersect1d(idxs[dim], sel)
-            idxs = [idxs]
-        elif mode == 'split':
-            # test if all selection dims are the same size, or all are singleton except one
-            sel_sizes = np.array([len(sel) for sel in self._selection.values()])
-            if np.all(sel_sizes == 1):
-                # if all selections are singleton, then just pass the single set of indices
-                for dim in range(self.dim_num):
-                    idxs.append(self._selection[dim][0])
-                idxs = [idxs]
-            elif np.all(sel_sizes == sel_sizes[0]):
-                # if all dimensions have the same number of selections, then return each set of selections
-                for sel_i in range(sel_sizes[0]):
-                    idxs.append([self._selection[d][sel_i] for d in range(self.dim_num)])
-            elif (np.unique(sel_sizes).size == 2) and (np.sum(sel_sizes == 1) == (self.dim_num-1)):
-                # if only one dimension has multiple selections, then split the data along that dimension
-                split_dim = np.where(sel_sizes != 1)[0][0]
-                for sel_i in range(sel_sizes[split_dim]):
-                    idxs.append([])
-                    for d in range(self.dim_num):
-                        if d == split_dim:
-                            idxs[-1].append(self._selection[d][sel_i])
-                        else:
-                            idxs[-1].append(self._selection[d][0])
-            else:
-                raise ValueError('Selections are not compatible for split mode')    
+        elif np.all(sel_sizes == sel_sizes[0]):
+            # if all dimensions have the same number of selections, then return each set of selections
+            for sel_i in range(sel_sizes[0]):
+                idxs.append([self._selection[d][sel_i] for d in range(self.dim_num)])
+        elif (np.unique(sel_sizes).size == 2) and (np.sum(sel_sizes == 1) == (self.dim_num-1)):
+            # if only one dimension has multiple selections, then split the data along that dimension
+            split_dim = np.where(sel_sizes != 1)[0][0]
+            for sel_i in range(sel_sizes[split_dim]):
+                idxs.append([])
+                for d in range(self.dim_num):
+                    if d == split_dim:
+                        idxs[-1].append(self._selection[d][sel_i])
+                    else:
+                        idxs[-1].append(self._selection[d][0])
+        else:
+            raise ValueError('Selections are not compatible for split mode')    
 
         # get the data based on the indices
         if self._verbose:
@@ -594,7 +650,7 @@ class dclut():
         
         # ensure consistent formatting of values
         values = []
-        for sn in select:
+        for sn in select.keys():
             values.append(np.array(select[sn]))
 
         # check that all values are the same shape
