@@ -17,7 +17,7 @@ setup(
         author_email="drewbheadley@gmail.com",
         description=DESCRIPTION,
         long_description=readme,
-        packages=find_packages(where='dclut'),
+        packages=find_packages(include=['dclut', 'dclut.*']),
         install_requires=requirements,
         keywords=['python', 'binary files', 'lookup table', 'dclut'],
         classifiers= [
