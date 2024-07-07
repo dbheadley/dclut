@@ -1,7 +1,7 @@
 from setuptools import setup, find_packages
 
 VERSION = '0.0.1' 
-DESCRIPTION = 'dclut: Dimensionally Clear Look Up Table'
+DESCRIPTION = 'dclut: Dimensionally Clear Look-Up Table'
 
 with open("README.md", "r") as f:
     readme = f.read()
