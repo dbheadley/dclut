@@ -21,8 +21,10 @@ setup(
         install_requires=requirements,
         keywords=['python', 'binary files', 'lookup table', 'dclut'],
         classifiers= [
-            "Development Status :: Alpha",
-            "Intended Audience :: Researchers",
+            "Development Status :: 3 - Alpha",
+            "Intended Audience :: Science/Research",
+            "License :: OSI Approved :: MIT License",
+            "Natural Language :: English",
             "Programming Language :: Python :: 3",
             "Operating System :: MacOS :: MacOS X",
             "Operating System :: Microsoft :: Windows",
