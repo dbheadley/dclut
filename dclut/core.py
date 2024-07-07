@@ -1,14 +1,12 @@
 import numpy as np
 import os
 import json
-import re
 import xarray as xr
 from tqdm import tqdm
 from .utils import *
 
 def create_dclut(bin_path, shape, dcl_path=None, dtype='int16', data_name='data', 
-                 data_unit='au', scale_names=[], scale_dims=[], scale_units=[], 
-                 scale_types=[], scale_vals=[]):
+                 data_unit='au', scales=[]):
     """
     Create a dclut meta data file for a binary file. The meta file is formatted
     as a JSON file with the following fields.
@@ -31,30 +29,31 @@ def create_dclut(bin_path, shape, dcl_path=None, dtype='int16', data_name='data'
         Name of the data. Default is 'data'.
     data_unit : str
         Unit of the data. Default is 'au'.
-    scale_names : list of str
-        Names of the scales. Default is ['s0', s1', ... 'sN'], where N is the number
-        of dimensions.
-    scale_dims : list, tuple, or numpy array of int
-        Dimension to assign each scale. Default is [0, 1, ... N].
-    scale_units : list of str
-        Units of the scales. Default is ['au', 'au', ...].
-    scale_type : list of str
-        Type of scales. These are:
-        1. 'list' : A list of values, with one for each index.
-        2. 'table' : An Nx2 array of values, where the first column is the index
+    scales : list of dicts with scale settings. Each dict must have the following keys:
+        name: str
+            Names of the scales. Default is ['s0', s1', ... 'sN'], where N is the number
+            of dimensions.
+        dim : int
+            Dimension to assign each scale. Default is [0, 1, ... N].
+        unit : str
+            Units of the scales. Default is ['au', 'au', ...].
+        type : str
+            Type of scale. These are:
+            1. 'list' : A list of values, with one for each index.
+            2. 'table' : An Nx2 array of values, where the first column is the index
                         and the second column is the value. Entries can be nonconsecutive.
                         Interpolation is required to fill in missing values.
-        4. 'linear' : A slope factor and offset. The values are calculated as
+            3. 'linear' : A slope factor and offset. The values are calculated as
                         value = index*slope + offset.
-        3. 'index' : Just the indices are used, starting at 0 and going in steps of 1.
-        Default is ['index', 'index', ...].
-    scale_vals : list of numpy arrays
-        Values of the scales. If corresponding scale_type is 'list', then the array
-        must have the same length as the scale's corresponding dimension. If the scale_type is 
-        'table', then the array must be Nx2, where the first column is the index and 
-        the second column is the value. The first row must be [0, value0] and the last
-        row must be [length-1, valueN], where length is the length of the scale. If
-        the scale_type is 'index', then scale_vals is ignored (place None in the list).
+            4. 'index' : Just the indices are used, starting at 0 and going in steps of 1.
+            Default is ['index', 'index', ...].
+        val : numpy array
+            Values for the scale. If corresponding scale_type is 'list', then the array
+            must have the same length as the scale's corresponding dimension. If the scale_type is 
+            'table', then the array must be Nx2, where the first column is the index and 
+            the second column is the value. The first row must be [0, value0] and the last
+            row must be [length-1, valueN], where length is the length of the scale. If
+            the scale_type is 'index', then scale_vals is ignored (place None in the list).
 
     Returns
     -------
@@ -91,19 +90,14 @@ def create_dclut(bin_path, shape, dcl_path=None, dtype='int16', data_name='data'
     if dcl_path is None:
         dcl_path = os.path.splitext(bin_path)[0] + '_dclut.json'
 
-    if (len(scale_dims) == 0) and (len(scale_names) !=0):
-        if len(scale_names) != dim_num:
-            raise ValueError('Number of scale names must match number of ' + 
-                             'dimensions when scale_dims are not provided')
-        scale_dims = list(range(dim_num))
-
     # Initialize default index scales then add user scales
-    scale_names.extend(['s' + str(d) for d in range(dim_num)])
-    scale_dims.extend(list(range(dim_num)))
-    scale_units.extend(['au'] * dim_num)
-    scale_types.extend(['index'] * dim_num)
-    scale_vals = [np.array(d) for d in scale_vals]
-    scale_vals.extend([None] * dim_num)
+    for i in range(dim_num):
+        scales.append({'name': 's{}'.format(i), 'dim': i, 'unit': 'au', 'type': 'index', 'val': None})
+
+    # ensure all scale vals are numpy arrays
+    for scale in scales:
+        if scale['val'] is not None:
+            scale['val'] = np.array(scale['val'])
     
     file_name = os.path.basename(bin_path)
     dcl = {}
@@ -111,35 +105,36 @@ def create_dclut(bin_path, shape, dcl_path=None, dtype='int16', data_name='data'
     dcl['data'] = {'name': data_name, 'unit': data_unit, 'type': dtype, 'params': {}}
     dcl['scales'] = {}
 
-    for i, sn in enumerate(scale_names):
-        curr_dim = scale_dims[i]
-        curr_unit = scale_units[i]
-        curr_type = scale_types[i]
-        curr_vals = scale_vals[i]
-        dcl['scales'][sn] = {'dim': curr_dim, 'unit': curr_unit, 'type': curr_type}
+    for sc in scales:
+        curr_name = sc['name']
+        curr_dim = sc['dim']
+        curr_unit = sc['unit']
+        curr_type = sc['type']
+        curr_vals = sc['val']
+        dcl['scales'][curr_name] = {'dim': curr_dim, 'unit': curr_unit, 'type': curr_type}
 
         if curr_type == 'list':
             if curr_vals.size != shape[curr_dim]:
-                raise ValueError('{}\'s scale values do not match shape'.format(sn))
-            dcl['scales'][sn]['values'] = curr_vals.tolist()
+                raise ValueError('{}\'s scale values do not match shape'.format(curr_name))
+            dcl['scales'][curr_name]['values'] = curr_vals.tolist()
 
         elif curr_type == 'table':
             if (curr_vals[0,0] != 0) or (curr_vals[-1,0] != shape[curr_dim]-1):
-                raise ValueError('{}\'s scale table is not properly formatted'.format(sn))
-            dcl['scales'][sn]['values'] = curr_vals.tolist()
+                raise ValueError('{}\'s scale table is not properly formatted'.format(curr_name))
+            dcl['scales'][curr_name]['values'] = curr_vals.tolist()
 
         elif curr_type == 'linear':
             if curr_vals.size != 2:
-                raise ValueError('{}\'s linear scale is not properly formatted'.format(sn))
-            dcl['scales'][sn]['values'] = curr_vals.tolist()
+                raise ValueError('{}\'s linear scale is not properly formatted'.format(curr_name))
+            dcl['scales'][curr_name]['values'] = curr_vals.tolist()
 
         elif curr_type == 'index':
-            dcl['scales'][sn]['values'] = None
+            dcl['scales'][curr_name]['values'] = None
 
         else:
-            raise ValueError('Unrecognized type for scale {}'.format(sn))
+            raise ValueError('Unrecognized type for scale {}'.format(curr_name))
         
-        dcl['scales'][sn]['params'] = {}
+        dcl['scales'][curr_name]['params'] = {}
 
     with open(dcl_path, 'w') as f:
         json.dump(dcl, f)
@@ -741,7 +736,15 @@ class dclut():
             s += '  ' + '-'*len(sn) + '\n'
             s += '  dimension: {}\n'.format(sv['dim'])
             s += '  type: {}\n'.format(sv['type'])
-            scale_values = self.scale_values(sn)
+            dim_len = self.dcl['file']['shape'][sv['dim']]
+            if sv['type'] == 'index':
+                scale_values = np.array([0, dim_len-1])
+            elif sv['type'] == 'linear':
+                scale_values = np.array([sv['values'][0]*dim_len, 0])+ sv['values'][1]
+            elif sv['type'] == 'table':
+                scale_values = np.array(sv['values'][:,1])
+            else:
+                scale_values = sv['values']
             if scale_values.dtype == np.number:
                 s += '  min: {}\n'.format(np.nanmin(scale_values))
                 s += '  max: {}\n'.format(np.nanmax(scale_values))
