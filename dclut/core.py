@@ -225,26 +225,17 @@ class dclut():
         if intervals[0].size == 2:
             intervals = [i.reshape(1,2) for i in intervals]
         
-        if intervals[0].shape[1] != 2:
-            raise ValueError('Intervals must be pairs of values')
-        
         idxs = []
-        if intervals is None:
-            idxs.append(np.arange(0, self.shape[dim]))
+        num_intervals = intervals[0].shape[0]
+
+        if num_intervals == 0:
+            idxs = [np.array([])]
         else:
-            for i in range(intervals[0].shape[0]):
+            for i in range(num_intervals):
                 values = [interval[i] for interval in intervals]
                 idxs.append(self._find_index(scales, values, mode='exact'))
-        
+    
         self._update_selection(dim, idxs, mode=select_mode)
-
-
-        # if intervals is None: # return all values if no intervals are provided
-        #     self._selection[dim].append(np.arange(0, self.shape[dim]))
-        # else: # find the index for the intervals
-        #     for i in range(intervals[0].shape[0]):
-        #         values = [interval[i] for interval in intervals]
-        #         self._selection[dim].append(self._find_index(scales, values, mode='exact'))
 
         return self
 
@@ -277,10 +268,12 @@ class dclut():
         self._initialize_selection(dim)
 
         idxs = []
-        if points is None:
-            idxs = np.arange(0, self.shape[dim])
+        num_points = points[0].size
+
+        if num_points == 0:
+            idxs = [np.array([])]
         else:
-            for p in range(points[0].size):
+            for p in range(num_points):
                 values = [point[p] for point in points]
                 idxs.append(self._find_index(scales, values, mode=find_mode))
         
@@ -479,7 +472,7 @@ class dclut():
             Name of the scales. Must be from the same dimension. Multiple scales
             can be provided when each is a list type. In that case, the indices 
             that minimizes the distance across all the scales will be returned.
-        values : list of array-like
+        values : list of np.ndarray
             Values to find. List of values is used when multiple scales are provided.
             The number of values must be the same for each scale. Usually only one 
             value is provided, but if two are provided, the first is the start and
@@ -512,7 +505,7 @@ class dclut():
 
             values_num = values[0].size
             scales_num = len(scales)
-            value_idxs = [] #np.zeros(values_num, dtype=int)
+            value_idxs = []
 
             # if only one value, find the index/indices that are closest/match
             if values_num == 1: 
@@ -622,13 +615,13 @@ class dclut():
             Validated values.
         """
 
-        if type(select) == np.ndarray:
-            select = [select]
-        
         # ensure consistent formatting of values
         values = []
         for sn in select.keys():
-            values.append(np.array(select[sn]))
+            if select[sn] is None:
+                values.append(np.array([]))
+            else:
+                values.append(np.array(select[sn]))
 
         # check that all values are the same shape
         shp = values[0].shape
@@ -645,8 +638,6 @@ class dclut():
         
         if self._selection[dim] is None:
             self._selection[dim] = [] #[[]]
-        # else:
-        #     self._selection[dim].append([])
 
 
     def scale_values(self, scale, indices=None):
