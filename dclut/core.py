@@ -1,6 +1,7 @@
 import numpy as np
 import os
 import json
+import copy
 import xarray as xr
 from tqdm import tqdm
 from .utils import *
@@ -48,12 +49,13 @@ def create_dclut(bin_path, shape, dcl_path=None, dtype='int16', data_name='data'
             4. 'index' : Just the indices are used, starting at 0 and going in steps of 1.
             Default is ['index', 'index', ...].
         val : numpy array
-            Values for the scale. If corresponding scale_type is 'list', then the array
-            must have the same length as the scale's corresponding dimension. If the scale_type is 
-            'table', then the array must be Nx2, where the first column is the index and 
-            the second column is the value. The first row must be [0, value0] and the last
-            row must be [length-1, valueN], where length is the length of the scale. If
-            the scale_type is 'index', then scale_vals is ignored (place None in the list).
+                Values for the scale. If corresponding scale_type is 'list', then the array
+                must have the same length as the scale's corresponding dimension. If scale_type
+                is 'linear', then values are [slope, offset]. If the scale_type is 'table', 
+                then the array must be Nx2, where the first column is the index and the second 
+                column is the value. The first row must be [0, value0] and the last row must be
+                [length-1, valueN], where length is the length of the scale. If the scale_type 
+                is 'index', then scale_vals is ignored (place None in the list).
 
     Returns
     -------
@@ -146,33 +148,23 @@ def create_dclut(bin_path, shape, dcl_path=None, dtype='int16', data_name='data'
         
 class dclut():
     def __init__(self, path, verbose=False):
+        """
+        Initialize the dclut object.
 
-        self.dcl_path = path
+        Parameters
+        ----------
+        path : str
+            Path to a dclut file.
         
-        bin_dir = os.path.dirname(path)
-        with open(path, 'r') as f:
-            self.dcl = json.load(f)
-        
-        # convert all scales to numpy arrays after loading
-        # from json
-        for sn, sv in self.dcl['scales'].items():
-            if sv['type'] == 'list':
-                sv['values'] = np.array(sv['values'])
-            elif sv['type'] == 'table':
-                sv['values'] = np.array(sv['values'])
-            elif sv['type'] == 'linear':
-                sv['values'] = np.array(sv['values'])
-            elif sv['type'] == 'index':
-                sv['values'] = None
-            else:
-                raise ValueError('Unrecognized type for scale {}'.format(sn))
-        
-        self.bin_path = os.path.join(bin_dir, self.dcl['file']['name'])
+        Optional
+        --------
+        verbose : bool
+            If True, show progress bars for loading and reading data. Default is False.
+        """
+
+        self.load(path=path)
         self._verbose = verbose
-        self.shape = tuple(self.dcl['file']['shape'])
-        self.dim_num = len(self.shape)
-        self._set_fio()
-        self._selection = {d: None for d in range(self.dim_num)}
+
 
     def reset(self, dim=None):
         """
@@ -315,6 +307,183 @@ class dclut():
 
         return data
     
+    def create_scale(self, scale):
+        """
+        Create a scale for the dclut object.
+
+        Parameters
+        ----------
+        scale : dict
+            Scale settings. The dict must have the following keys:
+            name: str
+                Names of the scale.
+            dim : int
+                Dimension of scale.
+            unit : str
+                Unit of the scale.
+            type : str
+                Type of scale. These are:
+                1. 'list' : A list of values, with one for each index.
+                2. 'table' : An Nx2 array of values, where the first column is the index
+                            and the second column is the value. Entries can be nonconsecutive.
+                            Interpolation is required to fill in missing values.
+                3. 'linear' : A slope factor and offset. The values are calculated as
+                            value = index*slope + offset.
+                4. 'index' : Just the indices are used, starting at 0 and going in steps of 1.
+            val : numpy array
+                Values for the scale. If corresponding scale_type is 'list', then the array
+                must have the same length as the scale's corresponding dimension. If scale_type
+                is 'linear', then values are [slope, offset]. If the scale_type is 'table', 
+                then the array must be Nx2, where the first column is the index and the second 
+                column is the value. The first row must be [0, value0] and the last row must be
+                [length-1, valueN], where length is the length of the scale. If the scale_type 
+                is 'index', then scale_vals is ignored (place None in the list).
+        
+        Returns
+        -------
+        self : dclut object
+            The dclut object with the new scale added.
+        """
+
+        sc_name = scale['name']
+        sc_dim = scale['dim']
+        sc_unit = scale['unit']
+        sc_type = scale['type']
+        sc_vals = np.array(scale['values'])
+
+        if sc_name in self.dcl['scales']:
+            raise ValueError('Scale {} already exists'.format(sc_name))
+        
+        self.dcl['scales'][sc_name] = {'dim': sc_dim, 'unit': sc_unit, 'type': sc_type}
+
+        if sc_type == 'list':
+            if sc_vals.size != self.shape[sc_dim]:
+                raise ValueError('{}\'s scale values do not match shape'.format(sc_name))
+            self.dcl['scales'][sc_name]['values'] = sc_vals
+
+        elif sc_type == 'table':
+            if (sc_vals[0,0] != 0) or (sc_vals[-1,0] != self.shape[sc_dim]-1):
+                raise ValueError('{}\'s scale table is not properly formatted'.format(sc_name))
+            self.dcl['scales'][sc_name]['values'] = sc_vals
+
+        elif sc_type == 'linear':
+            if sc_vals.size != 2:
+                raise ValueError('{}\'s linear scale is not properly formatted'.format(sc_name))
+            self.dcl['scales'][sc_name]['values'] = sc_vals
+
+        elif sc_type == 'index':
+            self.dcl['scales'][sc_name]['values'] = None
+
+        else:
+            raise ValueError('Unrecognized type for scale {}'.format(sc_name))
+        
+        self.dcl['scales'][sc_name]['params'] = {}
+
+        return self
+
+    def remove_scale(self, scale_name):
+        """
+        Remove a scale from the dclut object.
+        
+        Parameters
+        ----------
+        scale_name : str
+            Name of the scale to remove.
+            
+        Returns
+        -------
+        self : dclut object
+            The dclut object with the scale removed.
+        """
+
+        if scale_name not in self.dcl['scales']:
+            raise ValueError('Scale {} not found'.format(scale_name))
+        
+        del self.dcl['scales'][scale_name]
+    
+        return self
+    
+    def save(self, path=None):
+        """
+        Save the dclut object to a json file.
+        
+        Parameters
+        ----------
+        path : str
+            Path to save the dclut file. Default is the original path.
+
+        Returns
+        -------
+        path : str
+            Path to the saved dclut file.
+        """
+
+        # default to original path if none provided
+        if path is None:
+            path = self.dcl_path
+        
+        # convert all scales to lists for json serialization
+        dcl = copy.deepcopy(self.dcl)
+        for val in dcl['scales'].values():
+            if val['type'] != 'index':
+                val['values'] = val['values'].tolist()
+
+        # save the dclut file
+        with open(path, 'w') as f:
+            json.dump(dcl, f)
+
+        return path
+
+    def load(self, path=None):
+        """
+        Load a dclut object from a json file.
+        
+        Parameters
+        ----------
+        path : str
+            Path to the dclut file. Default is the original path, so
+            the dclut object will be reloaded from the original file.
+        
+        Returns
+        -------
+        self : dclut object
+            The dclut object loaded from the file.
+        """
+
+        if path is None:
+            path = self.dcl_path
+
+        self.dcl_path = path
+        
+        bin_dir = os.path.dirname(path)
+
+        with open(path, 'r') as f:
+            self.dcl = json.load(f)
+        
+        # convert all scales to numpy arrays after loading
+        # from json
+        for sn, sv in self.dcl['scales'].items():
+            if sv['type'] == 'list':
+                sv['values'] = np.array(sv['values'])
+            elif sv['type'] == 'table':
+                sv['values'] = np.array(sv['values'])
+            elif sv['type'] == 'linear':
+                sv['values'] = np.array(sv['values'])
+            elif sv['type'] == 'index':
+                sv['values'] = None
+            else:
+                raise ValueError('Unrecognized type for scale {}'.format(sn))
+        
+        self.bin_path = os.path.join(bin_dir, self.dcl['file']['name'])
+        self.shape = tuple(self.dcl['file']['shape'])
+        self.dim_num = len(self.shape)
+        self._set_fio()
+        self.reset()
+
+        return self
+
+
+
     def _set_fio(self):
         self._fio = np.memmap(self.bin_path, dtype=self.dcl['data']['type'], mode='r', 
                               shape=self.shape)
@@ -637,7 +806,7 @@ class dclut():
         """
         
         if self._selection[dim] is None:
-            self._selection[dim] = [] #[[]]
+            self._selection[dim] = []
 
 
     def scale_values(self, scale, indices=None):
